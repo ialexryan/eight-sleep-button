@@ -112,6 +112,7 @@ void showStatus() {
   JsonDocument d;
   d["event"] = "status"; d["firmware"] = "0.1.0";
   d["configured"] = configured.load(); d["wifi"] = WiFi.status() == WL_CONNECTED;
+  d["hostname"] = WiFi.STA.getHostname();
   d["time_synced"] = clockReady(); d["busy"] = requestBusy.load();
   d["test_mode"] = testMode.load(); d["presses"] = pressCount.load();
   d["completed"] = completedCount.load(); d["uptime_s"] = millis() / 1000;
@@ -224,6 +225,7 @@ void setup() {
     Serial.println("{\"event\":\"unsupported_hardware\"}");
   }
   WiFi.persistent(false);
+  WiFi.setHostname("eight-sleep-button");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false); // explicit bounded reconnect schedule
   WiFi.setSleep(true);

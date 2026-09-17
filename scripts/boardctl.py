@@ -8,7 +8,7 @@ import serial
 
 FIELDS = {"event", "firmware", "configured", "wifi", "time_synced", "busy", "test_mode",
           "presses", "completed", "uptime_s", "hardware", "free_heap", "api", "code",
-          "simulated", "activation"}
+          "simulated", "activation", "hostname"}
 
 
 def main():

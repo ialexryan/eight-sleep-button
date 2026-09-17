@@ -15,6 +15,10 @@ Uses an unofficial API. This project is unaffiliated with Eight Sleep. It sends 
 
 M5GFX supports both the older GC9107 and the May 2026 ST7735 panel revisions. Runtime diagnostics report the detected panel. Hardware feedback, button logic, and the API client are separate modules.
 
+The device advertises the Wi-Fi hostname **`eight-sleep-button`**. USB `status`
+reports the active interface hostname. The name takes effect after flashing this
+firmware and reconnecting to Wi-Fi; a router's saved device label may differ.
+
 ## Build and flash
 
 Prerequisites on macOS: Xcode command-line tools, `uv`, and Internet access. The bootstrap installs one project-local Arduino CLI stack, with all generated/downloaded files ignored by Git.
