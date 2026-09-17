@@ -1,0 +1,2 @@
+#pragma once
+#define CONFIG_MBEDTLS_CERTIFICATE_BUNDLE 1

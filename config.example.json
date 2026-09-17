@@ -1,0 +1,5 @@
+{
+  "hardware": "atoms3r",
+  "audio": false,
+  "notes": "Non-secret documentation only. Enter Wi-Fi and account credentials through scripts/eightctl.py; do not put them here."
+}

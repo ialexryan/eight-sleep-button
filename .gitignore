@@ -1,0 +1,15 @@
+.local/
+.tools/
+.venv/
+.arduino/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+secrets*
+*.bin
+*.elf
+*.map
+*.log
