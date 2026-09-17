@@ -53,8 +53,9 @@ The generator's layout preview and an independent review verified bounds and
 font format. The S3R build and existing safety/API tests passed. Font regeneration
 matches the checked-in data. The flashed board rebooted, synchronized time, and
 authenticated with zero accepted/completed presses. Backlight stays at 8/255;
-display ink has higher contrast, and Lite LED behavior is unchanged. Physical
-readability in a dark room remains a user observation, not a build-test result.
+display ink has higher contrast, and Lite LED behavior is unchanged. The user
+observed the actual screen and confirmed that the revised text is much easier to
+read with nothing cut off. Overnight/dark-room use remains separate.
 Six USB visual previews were acknowledged by the real board; afterward it remained
 in live mode, authenticated and idle, with zero accepted/completed presses. These
 previews exercise font rendering without sending a cooling request.
