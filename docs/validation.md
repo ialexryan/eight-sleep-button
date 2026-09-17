@@ -16,7 +16,7 @@ Keep simulated, compiled, and observed results separate. No account identifiers,
 - Native button logic: boot-held suppression, debounce, one short-press event, long-press suppression, busy-press discard, and millis rollover.
 - Mocked laptop API tests: identity/side mismatch, missing schema, bodyless activation, already-active suppression, ambiguous timeout/408 confirmation, token refresh/rotation, 401 recovery, rate limits, natural termination, and configuration preservation.
 - Native firmware API client tests use the real C++ client with mocked ESP32 HTTP/Wi-Fi/time and real ArduinoJson. They exercise token rotation, backoff, stale presses, timeout confirmation, response limits, and exactly one activation write.
-- 36 firmware API mock scenarios and 32 laptop API mock tests pass.
+- 64 firmware API mock scenarios and 57 laptop/diagnostic mock tests pass.
 - Actual USB regression: a 7 KB non-secret status burst is accepted; oversized input is rejected and parsing recovers. This caught and fixed the core's 256-byte default receive-buffer limitation before successful provisioning.
 - Read-only account authentication and current device/side checks succeeded on the intended account. Existing cooling settings were read and left unchanged.
 
@@ -26,7 +26,7 @@ Keep simulated, compiled, and observed results separate. No account identifiers,
 - [ ] Existing finite cycle ends naturally; reported settings and schedule configuration preserved.
 - [x] Display/button/base identification and unobtrusive screen feedback observed on the connected board. Optional audio remains off and untested.
 - [x] Physical press invokes cooling with API confirmation. USB reported `Confirmed` in live mode; the user saw Rapid Cooling in the app and felt their side respond.
-- [x] Duplicate presses do not restart the cooling timer. Subsequent real presses returned `AlreadyActive`; the user confirmed the countdown did not restart.
+- [x] Initial firmware's already-active behavior: subsequent presses returned `AlreadyActive`; the user confirmed the countdown did not restart. This has since been superseded by the requested intentional timer-reset behavior below.
 - [x] Wi-Fi disconnect/recovery; no delayed activation. Forced disconnection/reconnection on the real board restored Wi-Fi and preserved the accepted/completed request counts.
 - [x] Board refresh-token exchange succeeds across software reset/reflash using saved credentials. Physical wall-power cold-start acceptance remains separate.
 - [ ] Power interruption and boot-held button produce no activation.
@@ -63,6 +63,44 @@ previews exercise font rendering without sending a cooling request.
 The last two checks require actual elapsed time/physical operation. A successful build or mocked response is not evidence for them.
 
 ## API observations
+
+### Timer-reset experiment
+
+The user subsequently requested that another deliberate press reset an active
+cycle's expiration. A live, bodyless activation while already active returned
+**HTTP 409 Conflict**. Readback showed unchanged `currentState.started`, `until`,
+and `instance.timestamp`. The earlier duplicate-press test had skipped that write
+in firmware; it did not establish how the server handles duplicate activation.
+
+A single native deactivate then confirmed normal-state readback, followed by one
+native activate, produced a fresh `hotFlash` start and a later expiration. The
+new start-to-expiration span matched the existing configured duration. Three
+readbacks agreed. Cooling settings and schedule/temperature configuration were
+unchanged. These are laptop-side live API observations; updated firmware and
+physical-button acceptance are recorded separately when completed.
+The user independently confirmed that the app showed a fresh countdown after
+the off-then-on experiment.
+
+The diagnostic defaults to read-only and writes only with explicit `--activate`
+or `--restart`. Mocked probe tests cover narrow write ordering, target
+checks, rejected/ambiguous requests, stale windows, timing output and preservation
+checks. No automatic mutation retries or settings writes were introduced.
+
+Firmware 0.2.0 implements the off/read/on sequence for an intentional press while
+active. Success requires later start/expiry, the original cycle span within one
+second, and a start near the activation request. Missing timing prevents the
+restart. An incomplete restart reports “Check app” and cannot queue a delayed
+activation. Native tests also cover stale presses, partial failures, unchanged
+expiry, mismatched sides, invalid timing, and Retry-After on rejected/service
+responses. Server backoff applies to confirmation reads as well as writes.
+
+The full pinned S3R build and all automated checks passed. Firmware 0.2.0 was
+flashed and rebooted with zero accepted/completed presses, live mode enabled,
+Wi-Fi/time ready, and successful account authentication. The station interface
+reports hostname `eight-sleep-button`. Physical restart-button observations are
+separate from this startup check.
+
+### Existing observations
 
 The native feature still uses the legacy `hot-flash-mode` naming. Authentication returns camelCase `userId`; identity comes from `client-api`, while cooling uses `app-api`. The reference's Java client does not implement activation, so its documentation alone is not a live validation result.
 

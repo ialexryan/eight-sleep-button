@@ -16,7 +16,7 @@ def main():
     parser.add_argument("command", choices=("status", "monitor", "feedback", "test-on", "test-off", "disconnect", "erase"))
     parser.add_argument("--port", default="/dev/cu.usbmodem1101")
     parser.add_argument("--seconds", type=int, default=5)
-    parser.add_argument("--state", choices=("started", "active", "busy", "failure", "diagnostics"),
+    parser.add_argument("--state", choices=("started", "reset", "busy", "failure", "diagnostics"),
                         help="For feedback only: five-second visual preview, without activating the bed")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 3600:

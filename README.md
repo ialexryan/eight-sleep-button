@@ -4,7 +4,7 @@ A standalone, quiet M5Stack nightstand button for Eight Sleep's finite **Rapid C
 
 Uses an unofficial API. This project is unaffiliated with Eight Sleep. It sends the native bodyless `PUT /v1/users/{userId}/temperature/hot-flash-mode/activate`; it never implements cooling by changing a permanent setpoint, schedule, alarm, or Autopilot setting.
 
-**Bring-up status:** firmware compiles and the offline safety tests pass. See [validation](docs/validation.md) for the distinction between simulated tests, device tests, and live bed tests. Do not infer end-to-end validation from a successful build.
+**Validation:** built and flashed on an AtomS3R, with live Rapid Cooling activation and native timer-reset API checks. See [validation](docs/validation.md) for observed hardware results and remaining wall-power/overnight checks.
 
 ## Hardware
 
@@ -76,11 +76,16 @@ For a device that is already configured, hold its face for two seconds before pr
 
 ## Use
 
-- **Short press and release:** activate native Rapid Cooling on the verified account's side. If already active, return success without restarting its timer.
+- **Short press and release:** activate native Rapid Cooling on the verified account's side. If already active, reset its timer with one native deactivate, a read confirming it stopped, then one native activation. The existing configured duration and cooling level are preserved.
 - **Long hold (1.5 seconds):** brief local diagnostics and a USB setup window; no bed change.
-- Screen/backlight stays off when idle. Amber “Sending” means request in progress. Green **“Rapid Cooling”** with **“Started”** means a new cycle was confirmed; **“Already active”** means its existing timer was left untouched. Red means failure. “Check app” means the result is uncertain; do not assume a timeout means the request failed.
+- Screen/backlight stays off when idle. Amber “Sending” means request in progress. Green **“Rapid Cooling”** with **“Started”** means a new cycle was confirmed; **“Timer reset”** means a restart with a later expiration was confirmed. Red means failure. “Check app” means the result is uncertain; do not assume a timeout means the request failed.
 - A press during a request is discarded. Offline presses are discarded. No press is queued for later reconnection.
 - Boot, reset, reconnection, flashing, and a button held during boot never activate cooling.
+
+A new deliberate press can reset an active cycle. Button bounce and presses during
+a request are still discarded. A restart has two writes: if cooling stops but the
+new activation fails, it can remain off. Check the app after uncertain feedback;
+the firmware never queues a delayed restart or automatically repeats either write.
 
 The S3R uses large semibold text with native grayscale antialiasing and high-contrast
 colored lettering on black. “Rapid Cooling” fills two lines, with a larger result
@@ -104,7 +109,7 @@ licensed font and reproducible generator are documented in [display fonts](asset
 .venv/bin/python scripts/boardctl.py feedback
 # Five-second visual previews; no bed command, tone, or change to button mode:
 .venv/bin/python scripts/boardctl.py feedback --state started
-.venv/bin/python scripts/boardctl.py feedback --state active
+.venv/bin/python scripts/boardctl.py feedback --state reset
 .venv/bin/python scripts/boardctl.py feedback --state busy
 .venv/bin/python scripts/boardctl.py feedback --state failure
 ```
@@ -122,6 +127,13 @@ For a simulated physical-button test, long-hold first if configured, then run `b
 If USB enumeration fails, try a known data-capable cable. For the AtomS3R, hold the **reset/download button** about two seconds until its internal green LED lights, then release to enter download mode. Re-list serial ports and retry flashing. A blank screen during normal idle is intentional; use the face long hold or `feedback` to check it.
 
 If “Setup needed” appears, provision the board. If Wi-Fi is unavailable, check 2.4 GHz coverage and password. If time is unsynchronized, allow NTP through the network. If credentials are rejected, log in and provision again. If a request is uncertain, check the app before another press; the firmware checks existing cooling state before any further activation.
+
+For the narrow timer-reset experiment (after local `login`),
+`scripts/retrigger_probe.py` reads timing by default. `--activate` deliberately sends
+one activation while already active; `--restart` tests native off-then-on with
+readback. These are live tests on the previously verified side. Both flags require
+an active cycle and neither retries a write or changes settings. A normal
+`eightctl.py activate` remains a non-resetting setup diagnostic.
 
 ## References
 

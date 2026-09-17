@@ -6,10 +6,18 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <time.h>
 #include <vector>
 #include "EightSleepClient.h"
 
 uint64_t fakeNowMs = 1000;
+// 2030-01-01T15:10:00Z at the default fake monotonic time (1000ms).
+// Only the host executable overrides libc time; production uses SNTP time.
+extern "C" time_t time(time_t* result) {
+  const time_t current = static_cast<time_t>(1893510599 + fakeNowMs / 1000);
+  if (result) *result = current;
+  return current;
+}
 struct Reply {
   esp_http_client_method_t method;
   std::string suffix;
@@ -150,10 +158,32 @@ Reply temperature(std::string state = "smart:bedtime", std::string side = "right
 Reply put(int status = 204, esp_err_t error = ESP_OK) {
   return {HTTP_METHOD_PUT, "/hot-flash-mode/activate", status, "", error};
 }
+Reply cooling(std::string started = "2030-01-01T15:08:58Z",
+              std::string until = "2030-01-01T15:38:58Z") {
+  Reply reply = temperature("hotFlash");
+  JsonDocument aggregate; deserializeJson(aggregate, reply.body);
+  aggregate["devices"][0]["currentState"]["started"] = started;
+  aggregate["devices"][0]["currentState"]["until"] = until;
+  reply.body.clear(); serializeJson(aggregate, reply.body);
+  return reply;
+}
+Reply renewed() { return cooling("2030-01-01T15:10:00Z", "2030-01-01T15:40:00Z"); }
+Reply deactivate(int status = 204, esp_err_t error = ESP_OK) {
+  return {HTTP_METHOD_PUT, "/hot-flash-mode/deactivate", status, "", error};
+}
 void beforePut() { replies = {auth(), identity(), temperature()}; }
+void beforeRestart() { replies = {auth(), identity(), cooling()}; }
 unsigned count(esp_http_client_method_t method) {
   unsigned found = 0;
   for (const auto& call : recorded) if (call.method == method) ++found;
+  return found;
+}
+unsigned countRoute(const std::string& suffix) {
+  unsigned found = 0;
+  for (const auto& call : recorded) {
+    if (call.url.size() >= suffix.size() &&
+        call.url.compare(call.url.size() - suffix.size(), suffix.size(), suffix) == 0) ++found;
+  }
   return found;
 }
 void test(const char* name, void (*run)()) {
@@ -170,8 +200,19 @@ void test(const char* name, void (*run)()) {
   }
   std::cout << "PASS " << name << '\n';
 }
+void expectUnconfirmedRestart(const Reply& after) {
+  auto c = config(); EightSleepClient client(c, saveToken);
+  beforeRestart();
+  replies.push_back(deactivate()); replies.push_back(temperature("smart:final"));
+  replies.push_back(put()); replies.push_back(after); replies.push_back(after);
+  assert(client.activate(millis()) == ApiResult::Ambiguous);
+  assert(countRoute("/hot-flash-mode/deactivate") == 1);
+  assert(countRoute("/hot-flash-mode/activate") == 1);
+  assert(client.activate(millis()) == ApiResult::Backoff);
+}
 
 int main() {
+  static_assert(static_cast<int>(ApiResult::Restarted) == 1, "Keep the result ordinal stable");
   test("confirmed native bodyless activation and persisted rotation", [] {
     auto c = config(); EightSleepClient client(c, saveToken);
     beforePut(); replies.push_back(put()); replies.push_back(temperature("hotFlash"));
@@ -179,10 +220,10 @@ int main() {
     assert(count(HTTP_METHOD_PUT) == 1 && saved.size() == 1);
     assert(c.refreshToken == "fixture-refresh-rotated");
   });
-  test("already-active cycle is never restarted", [] {
+  test("active cycle without timing is left unchanged", [] {
     auto c = config(); EightSleepClient client(c, saveToken);
     replies = {auth(), identity(), temperature("hotFlash")};
-    assert(client.activate(millis()) == ApiResult::AlreadyActive);
+    assert(client.activate(millis()) == ApiResult::Failed);
     assert(count(HTTP_METHOD_PUT) == 0);
   });
   test("identity-side mismatch fails closed", [] {
@@ -308,9 +349,9 @@ int main() {
     Reply nullIdentity = authWithoutIdentity();
     JsonDocument token; deserializeJson(token, nullIdentity.body); token["userId"] = nullptr;
     nullIdentity.body.clear(); serializeJson(token, nullIdentity.body);
-    replies = {nullIdentity, identity(), temperature("hotFlash")};
-    assert(client.activate(millis()) == ApiResult::AlreadyActive);
-    assert(c.userId == "fixture-user" && count(HTTP_METHOD_PUT) == 0);
+    replies = {nullIdentity, identity(), temperature(), put(), temperature("hotFlash")};
+    assert(client.activate(millis()) == ApiResult::Confirmed);
+    assert(c.userId == "fixture-user" && count(HTTP_METHOD_PUT) == 1);
   });
   test("refresh response without rotation retains existing credential", [] {
     auto c = config(); EightSleepClient client(c, saveToken);
@@ -420,5 +461,176 @@ int main() {
     const auto press = millis(); fakeNowMs += 500;
     beforePut(); replies.push_back(put()); replies.push_back(temperature("hotFlash"));
     assert(client.activate(press) == ApiResult::Confirmed && count(HTTP_METHOD_PUT) == 1);
+  });
+  test("intentional active press performs one off-on restart with a renewed full span", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature("smart:final"));
+    replies.push_back(put()); replies.push_back(renewed());
+    assert(client.activate(millis()) == ApiResult::Restarted);
+    assert(countRoute("/hot-flash-mode/deactivate") == 1 && countRoute("/hot-flash-mode/activate") == 1);
+    assert(recorded[3].url.find("/deactivate") != std::string::npos);
+    assert(recorded[5].url.find("/activate") != std::string::npos);
+    assert(std::string(client.diagnostic()) == "rapid cooling restarted; timer reset");
+  });
+  test("restart accepts fractional UTC timestamps and equivalent UTC spelling", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {auth(), identity(),
+               cooling("2030-01-01T15:08:58.125000000+00:00", "2030-01-01T15:38:58.125000000Z"),
+               deactivate(), temperature("smart:final"), put(),
+               cooling("2030-01-01T15:10:00.25Z", "2030-01-01T15:40:00.250+00:00")};
+    assert(client.activate(millis()) == ApiResult::Restarted);
+  });
+  test("invalid calendar or UTC timing prevents any restart mutation", [] {
+    const char* invalid[] = {"2030-02-29T15:08:58Z", "2030-04-31T15:08:58Z",
+                            "2030-01-01T24:08:58Z", "2030-01-01T15:08:60Z",
+                            "2030-01-01T15:08:58.Z", "2030-01-01T15:08:58+01:00"};
+    for (const char* started : invalid) {
+      auto c = config(); EightSleepClient client(c, saveToken);
+      replies = {auth(), identity(), cooling(started)};
+      assert(client.activate(millis()) == ApiResult::Failed);
+    }
+    assert(count(HTTP_METHOD_PUT) == 0);
+  });
+  test("nonpositive original cooling span prevents restart mutation", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {auth(), identity(), cooling("2030-01-01T15:08:58Z", "2030-01-01T15:08:58Z")};
+    assert(client.activate(millis()) == ApiResult::Failed && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("unchanged active timestamps cannot confirm a restart", [] {
+    expectUnconfirmedRestart(cooling());
+  });
+  test("advancing only expiration cannot confirm a restart", [] {
+    expectUnconfirmedRestart(cooling("2030-01-01T15:08:58Z", "2030-01-01T15:40:00Z"));
+  });
+  test("advancing only start cannot confirm a restart", [] {
+    expectUnconfirmedRestart(cooling("2030-01-01T15:10:00Z", "2030-01-01T15:38:58Z"));
+  });
+  test("small extension with an old start cannot confirm a full restart", [] {
+    expectUnconfirmedRestart(cooling("2030-01-01T15:08:59Z", "2030-01-01T15:38:59Z"));
+  });
+  test("renewed span differing by more than one second is unconfirmed", [] {
+    expectUnconfirmedRestart(cooling("2030-01-01T15:10:00Z", "2030-01-01T15:39:58.999Z"));
+  });
+  test("one second of native duration rounding is accepted", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature()); replies.push_back(put());
+    replies.push_back(cooling("2030-01-01T15:10:00Z", "2030-01-01T15:39:59Z"));
+    assert(client.activate(millis()) == ApiResult::Restarted);
+  });
+  test("restart start beyond clock tolerance is unconfirmed", [] {
+    expectUnconfirmedRestart(cooling("2030-01-01T15:10:05.001Z", "2030-01-01T15:40:05.001Z"));
+  });
+  test("missing renewed timestamps cannot confirm a restart", [] {
+    expectUnconfirmedRestart(temperature("hotFlash"));
+  });
+  test("deactivation timeout may proceed only after a read proves normal state", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate(0, ESP_FAIL)); replies.push_back(temperature("smart:final"));
+    replies.push_back(put()); replies.push_back(renewed());
+    assert(client.activate(millis()) == ApiResult::Restarted && count(HTTP_METHOD_PUT) == 2);
+  });
+  test("deactivation server failure may proceed after a read proves normal state", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate(500)); replies.push_back(temperature("smart:final"));
+    replies.push_back(put()); replies.push_back(renewed());
+    assert(client.activate(millis()) == ApiResult::Restarted && count(HTTP_METHOD_PUT) == 2);
+  });
+  test("deactivation uncertainty while still active never sends activate", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate(0, ESP_FAIL));
+    replies.push_back(cooling()); replies.push_back(cooling());
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    assert(count(HTTP_METHOD_PUT) == 1 && countRoute("/hot-flash-mode/activate") == 0);
+  });
+  test("unrecognized off confirmation never sends activate", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature("unknown"));
+    assert(client.activate(millis()) == ApiResult::Ambiguous && count(HTTP_METHOD_PUT) == 1);
+  });
+  test("wrong side in off confirmation never sends activate", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature("smart:final", "left"));
+    assert(client.activate(millis()) == ApiResult::Ambiguous && count(HTTP_METHOD_PUT) == 1);
+  });
+  test("deactivation 401 halts without refreshing or replaying a mutation", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate(401));
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    client.maintain(); assert(count(HTTP_METHOD_POST) == 1 && count(HTTP_METHOD_PUT) == 1);
+  });
+  test("deactivation 429 prevents all follow-up requests during Retry-After", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply limited = deactivate(429); limited.retryAfter = "180";
+    beforeRestart(); replies.push_back(limited);
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    fakeNowMs += 179000; assert(client.activate(millis()) == ApiResult::Backoff);
+    client.maintain(); assert(recorded.size() == 4);
+  });
+  test("restart preflight reserves time before stopping an existing cycle", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); for (auto& reply : replies) reply.elapsed = 3000;
+    assert(client.activate(millis()) == ApiResult::Failed && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("slow off confirmation drops stale final activate without later replay", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart();
+    Reply off = deactivate(); off.elapsed = 3500; replies.push_back(off);
+    Reply old = cooling(); old.elapsed = 3500; replies.push_back(old);
+    Reply unauthorized{HTTP_METHOD_GET, "/temperature/all", 401}; unauthorized.elapsed = 3500;
+    replies.push_back(unauthorized);
+    Reply refreshed = auth("fixture-refresh-again"); refreshed.elapsed = 3500; replies.push_back(refreshed);
+    Reply normal = temperature("smart:final"); normal.elapsed = 3500; replies.push_back(normal);
+    assert(client.activate(millis()) == ApiResult::Ambiguous && count(HTTP_METHOD_PUT) == 1);
+    fakeNowMs += 60000; client.maintain(); assert(count(HTTP_METHOD_PUT) == 1);
+  });
+  test("final activation 401 after stopping cooling is a partial failure", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature()); replies.push_back(put(401));
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    assert(count(HTTP_METHOD_PUT) == 2 && count(HTTP_METHOD_POST) == 1);
+  });
+  test("final activation conflict never repeats the restart sequence", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature()); replies.push_back(put(409));
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    assert(client.activate(millis()) == ApiResult::Backoff && count(HTTP_METHOD_PUT) == 2);
+  });
+  test("final activation timeout confirms only the renewed full cycle", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature());
+    replies.push_back(put(0, ESP_FAIL)); replies.push_back(renewed());
+    assert(client.activate(millis()) == ApiResult::Restarted && count(HTTP_METHOD_PUT) == 2);
+  });
+  test("final activation 503 Retry-After suppresses even confirmation reads", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply unavailable = put(503); unavailable.retryAfter = "120";
+    beforeRestart(); replies.push_back(deactivate()); replies.push_back(temperature()); replies.push_back(unavailable);
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    fakeNowMs += 119000; assert(client.activate(millis()) == ApiResult::Backoff);
+    assert(recorded.size() == 6);
+  });
+  test("initial activation 503 Retry-After suppresses confirmation reads", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply unavailable = put(503); unavailable.retryAfter = "120";
+    beforePut(); replies.push_back(unavailable);
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    fakeNowMs += 119000; assert(client.activate(millis()) == ApiResult::Backoff);
+    assert(recorded.size() == 4);
+  });
+  test("off timeout bookkeeping cannot shorten a confirmation Retry-After", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply limited = temperature(); limited.status = 429; limited.retryAfter = "120";
+    beforeRestart(); replies.push_back(deactivate(0, ESP_FAIL)); replies.push_back(limited);
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    fakeNowMs += 31000; assert(client.activate(millis()) == ApiResult::Backoff);
+    assert(recorded.size() == 5);
+  });
+  test("activation timeout bookkeeping cannot shorten a confirmation Retry-After", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply limited = temperature(); limited.status = 429; limited.retryAfter = "120";
+    beforePut(); replies.push_back(put(0, ESP_FAIL)); replies.push_back(limited);
+    assert(client.activate(millis()) == ApiResult::Ambiguous);
+    fakeNowMs += 31000; assert(client.activate(millis()) == ApiResult::Backoff);
+    assert(recorded.size() == 5);
   });
 }

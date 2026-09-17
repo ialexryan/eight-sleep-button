@@ -110,7 +110,7 @@ void networkTask(void*) {
 
 void showStatus() {
   JsonDocument d;
-  d["event"] = "status"; d["firmware"] = "0.1.0";
+  d["event"] = "status"; d["firmware"] = "0.2.0";
   d["configured"] = configured.load(); d["wifi"] = WiFi.status() == WL_CONNECTED;
   d["hostname"] = WiFi.STA.getHostname();
   d["time_synced"] = clockReady(); d["busy"] = requestBusy.load();
@@ -143,7 +143,7 @@ void serialCommand(const String& line) {
     }
     const String state = d["state"] | "diagnostics";
     if (state == "started") hardware.preview(FeedbackStatus::Success, "Started");
-    else if (state == "active") hardware.preview(FeedbackStatus::Success, "Already active");
+    else if (state == "reset") hardware.preview(FeedbackStatus::Success, "Timer reset");
     else if (state == "busy") hardware.preview(FeedbackStatus::Busy);
     else if (state == "failure") hardware.preview(FeedbackStatus::Failure, "Check app");
     else if (state == "diagnostics") hardware.preview(FeedbackStatus::Diagnostics, "Display test");
@@ -244,10 +244,10 @@ void loop() {
   readSerial();
   Result result;
   if (xQueueReceive(results, &result, 0) == pdTRUE) {
-    const bool ok = result.outcome == ApiResult::Confirmed || result.outcome == ApiResult::AlreadyActive;
+    const bool ok = result.outcome == ApiResult::Confirmed || result.outcome == ApiResult::Restarted;
     hardware.show(ok ? FeedbackStatus::Success : FeedbackStatus::Failure,
                   testMode.load() ? "TEST only" : (ok ?
-                    (result.outcome == ApiResult::AlreadyActive ? "Already active" : "Started") :
+                    (result.outcome == ApiResult::Restarted ? "Timer reset" : "Started") :
                     (result.outcome == ApiResult::Ambiguous ? "Check app" : "Try again")));
     Serial.printf("{\"event\":\"result\",\"code\":%d,\"simulated\":%s}\n",
                   int(result.outcome), testMode.load() ? "true" : "false");

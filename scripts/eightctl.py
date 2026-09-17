@@ -125,7 +125,7 @@ class EightClient:
 
     def _exchange(self, method: str, url: str, body=None, token=None):
         if self.clock() < self.blocked_until:
-            raise DiagnosticError("A previous rate limit is still active; wait before retrying.")
+            raise DiagnosticError("A previous service rate limit/backoff is still active; wait before retrying.")
         headers = {"Accept": "application/json", "User-Agent": "eight-sleep-remote/0.1"}
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -138,7 +138,10 @@ class EightClient:
                 status = response.status_code
                 if not 200 <= status < 300:
                     retry_after = 0
-                    if status == 429:
+                    # A server-unavailable response may carry the same retry
+                    # instruction as 429. Persist it before reporting an
+                    # ambiguous PUT, so read-only confirmation also waits.
+                    if status == 429 or (500 <= status < 600 and response.headers.get("Retry-After")):
                         raw = response.headers.get("Retry-After", "60")
                         if raw.isdigit():
                             retry_after = max(60, int(raw))

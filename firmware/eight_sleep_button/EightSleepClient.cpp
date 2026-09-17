@@ -63,6 +63,56 @@ bool freshPress(uint32_t pressAtMs, uint32_t reserveMs = 0) {
          kPressLifetimeMs - reserveMs;
 }
 
+// Strict UTC ISO-8601 calendar parsing. Never compare timestamps as strings:
+// fractional precision and the equivalent Z/+00:00 spellings can differ.
+bool utcTimestampMs(const char* text, uint64_t& timestamp) {
+  if (!text) return false;
+  const size_t length = strlen(text);
+  if (length < 20 || length > 35 || text[4] != '-' || text[7] != '-' ||
+      text[10] != 'T' || text[13] != ':' || text[16] != ':') return false;
+  auto digits = [text](size_t at, size_t count) -> int {
+    int result = 0;
+    for (size_t i = at; i < at + count; ++i) {
+      if (text[i] < '0' || text[i] > '9') return -1;
+      result = result * 10 + text[i] - '0';
+    }
+    return result;
+  };
+  int year = digits(0, 4);
+  const int month = digits(5, 2), day = digits(8, 2);
+  const int hour = digits(11, 2), minute = digits(14, 2), second = digits(17, 2);
+  if (year < 1970 || month < 1 || month > 12 || day < 1 ||
+      hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return false;
+  static const int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  if (day > monthDays[month - 1] + (month == 2 && leap ? 1 : 0)) return false;
+  size_t at = 19;
+  uint32_t fractionMs = 0;
+  if (text[at] == '.') {
+    ++at;
+    size_t precision = 0;
+    while (text[at] >= '0' && text[at] <= '9') {
+      if (precision < 3) fractionMs = fractionMs * 10 + text[at] - '0';
+      ++precision;
+      ++at;
+      if (precision > 9) return false;
+    }
+    if (precision == 0) return false;
+    for (size_t i = precision; i < 3; ++i) fractionMs *= 10;
+  }
+  if (strcmp(text + at, "Z") != 0 && strcmp(text + at, "+00:00") != 0) return false;
+  year -= month <= 2;
+  const int era = year / 400;
+  const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+  const unsigned dayOfYear =
+      (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
+  const unsigned dayOfEra =
+      yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+  const int64_t days = era * 146097LL + dayOfEra - 719468;
+  timestamp = static_cast<uint64_t>(days * 86400 + hour * 3600 + minute * 60 + second) * 1000 + fractionMs;
+  return true;
+}
+
 // Parse both forms of Retry-After without relying on the process timezone.
 uint64_t retryDelayMs(const char* value) {
   if (!value || !*value) return 0;
@@ -215,12 +265,12 @@ void EightSleepClient::authFailure(const char* message, uint64_t retryAfterMs) {
 
 void EightSleepClient::apiFailure(const Response& response) {
   if (response.status == 429) {
-    _apiNotBeforeMs = nowMs() + std::max<uint64_t>(60000, response.retryAfterMs);
+    _apiNotBeforeMs = std::max(_apiNotBeforeMs, nowMs() + std::max<uint64_t>(60000, response.retryAfterMs));
     _diagnostic = "service rate limit; press discarded";
   } else if (response.error != ESP_OK || response.status >= 500) {
     if (_apiFailures < 6) ++_apiFailures;
     const uint64_t delayMs = std::min<uint64_t>(15000ULL << (_apiFailures - 1), 300000);
-    _apiNotBeforeMs = nowMs() + std::max(delayMs, response.retryAfterMs);
+    _apiNotBeforeMs = std::max(_apiNotBeforeMs, nowMs() + std::max(delayMs, response.retryAfterMs));
     _diagnostic = response.tooLarge ? "API response too large" : "network or service unavailable";
   } else {
     _diagnostic = "API request rejected";
@@ -357,10 +407,14 @@ String EightSleepClient::temperatureUrl() const {
   return "https://app-api.8slp.net/v1/users/" + _config.userId + "/temperature/";
 }
 
-EightSleepClient::TemperatureState EightSleepClient::temperatureState(const String& body) const {
+EightSleepClient::TemperatureState EightSleepClient::temperatureState(
+    const String& body, CycleTiming* timing) const {
+  if (timing) *timing = CycleTiming{};
   JsonDocument filter;
   filter["devices"][0]["device"] = true;
   filter["devices"][0]["currentState"]["type"] = true;
+  filter["devices"][0]["currentState"]["started"] = true;
+  filter["devices"][0]["currentState"]["until"] = true;
   JsonDocument aggregate;
   if (deserializeJson(aggregate, body, DeserializationOption::Filter(filter),
                       DeserializationOption::NestingLimit(12))) return TemperatureState::Invalid;
@@ -378,6 +432,12 @@ EightSleepClient::TemperatureState EightSleepClient::temperatureState(const Stri
     const char* type = item["currentState"]["type"].as<const char*>();
     if (strcmp(type, "hotFlash") == 0) {
       state = TemperatureState::Active;
+      if (timing && item["currentState"]["started"].is<const char*>() &&
+          item["currentState"]["until"].is<const char*>()) {
+        timing->valid = utcTimestampMs(item["currentState"]["started"].as<const char*>(), timing->startedMs) &&
+                        utcTimestampMs(item["currentState"]["until"].as<const char*>(), timing->untilMs) &&
+                        timing->untilMs > timing->startedMs;
+      }
     } else {
       static const char* normal[] = {"smart", "smart:initial", "smart:bedtime", "smart:final",
                                      "alarm", "off", "timeBased", "nap"};
@@ -402,6 +462,11 @@ void EightSleepClient::maintain() {
 }
 
 ApiResult EightSleepClient::activate(uint32_t pressAtMs) {
+  auto unfinished = [this](const char* diagnostic) {
+    _apiNotBeforeMs = std::max(_apiNotBeforeMs, nowMs() + 30000);
+    _diagnostic = diagnostic;
+    return ApiResult::Ambiguous;
+  };
   if (!freshPress(pressAtMs)) {
     _diagnostic = "stale press discarded";
     return ApiResult::Failed;
@@ -434,31 +499,81 @@ ApiResult EightSleepClient::activate(uint32_t pressAtMs) {
     apiFailure(before);
     return failureResult();
   }
-  const TemperatureState initial = temperatureState(before.body);
+  CycleTiming originalTiming;
+  const TemperatureState initial = temperatureState(before.body, &originalTiming);
   if (initial == TemperatureState::Invalid) {
     _diagnostic = "unrecognized temperature response; no action";
     return ApiResult::Failed;
   }
-  if (initial == TemperatureState::Active) {
-    _diagnostic = "rapid cooling already active; timer unchanged";
-    return ApiResult::AlreadyActive;
+  const bool restarting = initial == TemperatureState::Active;
+  if (restarting) {
+    if (!originalTiming.valid) {
+      _diagnostic = "active cooling timing unavailable; no action";
+      return ApiResult::Failed;
+    }
+    // Leave enough time for one off request, one confirming read, and one on
+    // request. A second read/401 recovery may use that reserve; recheck before on.
+    if (!freshPress(pressAtMs, 3 * kRequestTimeoutMs)) {
+      _diagnostic = "stale restart press discarded; cooling unchanged";
+      return ApiResult::Failed;
+    }
+    Response deactivation = request(base + "hot-flash-mode/deactivate", HTTP_METHOD_PUT);
+    if (deactivation.status == 401) {
+      _accessToken = "";
+      authFailure("restart deactivation unauthorized; not retried");
+      return unfinished("restart deactivation unauthorized; check app");
+    }
+    if ((deactivation.status >= 400 && deactivation.status < 500 && deactivation.status != 408) ||
+        (deactivation.status >= 500 && deactivation.retryAfterMs)) {
+      apiFailure(deactivation);
+      return unfinished("restart deactivation rejected; check app");
+    }
+    bool stopped = false;
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+      if (attempt) delay(600);
+      Response afterOff = get(base + "all", recovered401);
+      if (afterOff.error != ESP_OK || !success(afterOff.status)) {
+        apiFailure(afterOff);
+        break;
+      }
+      const TemperatureState observed = temperatureState(afterOff.body);
+      if (observed == TemperatureState::Normal) {
+        stopped = true;
+        break;
+      }
+      if (observed == TemperatureState::Invalid) break;
+    }
+    if (!stopped) {
+      if (deactivation.error != ESP_OK || deactivation.status >= 500) apiFailure(deactivation);
+      return unfinished("restart could not confirm cooling stopped; check app");
+    }
   }
   if (!freshPress(pressAtMs, kRequestTimeoutMs)) {
+    if (restarting) return unfinished("restart expired after cooling stopped; check app");
     _diagnostic = "stale press discarded";
     return ApiResult::Failed;
   }
 
-  // The sole bed mutation in this class: bodyless native Rapid Cooling. Never
-  // replay it, even following 401, 429, a timeout, or a successful HTTP response.
+  // Native bodyless routes only: at most one deactivate and one activate for
+  // this intentional press. Never replay either mutation after any response.
+  const uint64_t activationBeganWallMs = static_cast<uint64_t>(time(nullptr)) * 1000;
   Response activation = request(base + "hot-flash-mode/activate", HTTP_METHOD_PUT);
+  const uint64_t activationEndedWallMs = static_cast<uint64_t>(time(nullptr)) * 1000;
   if (activation.status == 401) {
     _accessToken = "";
     authFailure("activation unauthorized; not retried");
+    if (restarting) return unfinished("restart activation unauthorized; check app");
     return ApiResult::Failed;
   }
   if (activation.status >= 400 && activation.status < 500 && activation.status != 408) {
     apiFailure(activation);
+    if (restarting) return unfinished("restart activation rejected; check app");
     return failureResult();
+  }
+  if (activation.status >= 500 && activation.retryAfterMs) {
+    apiFailure(activation);
+    return unfinished(restarting ? "restart service unavailable; check app" :
+                                  "activation service unavailable; check app");
   }
   // State is the confirmation, not HTTP 2xx or a Wi-Fi connection. Poll reads
   // only, with a fixed budget; never queue a later write after uncertainty.
@@ -468,11 +583,27 @@ ApiResult EightSleepClient::activate(uint32_t pressAtMs) {
     if (attempt) delay(600);
     Response after = get(base + "all", recovered401);
     if (after.error == ESP_OK && success(after.status)) {
-      const TemperatureState observed = temperatureState(after.body);
+      CycleTiming renewed;
+      const TemperatureState observed = temperatureState(after.body, &renewed);
       if (observed == TemperatureState::Active) {
-        _apiFailures = 0;
-        _diagnostic = "rapid cooling confirmed";
-        return ApiResult::Confirmed;
+        bool resetConfirmed = !restarting;
+        if (restarting && renewed.valid) {
+          const uint64_t oldSpan = originalTiming.untilMs - originalTiming.startedMs;
+          const uint64_t newSpan = renewed.untilMs - renewed.startedMs;
+          const uint64_t spanDifference = oldSpan > newSpan ? oldSpan - newSpan : newSpan - oldSpan;
+          // Confirm a fresh full cycle, not a small extension of the old one.
+          // Allow one second of duration rounding and five seconds of clock
+          // skew around the on-request interval. Sub-ms changes fail closed.
+          resetConfirmed = renewed.startedMs > originalTiming.startedMs &&
+                           renewed.untilMs > originalTiming.untilMs && spanDifference <= 1000 &&
+                           renewed.startedMs + 5000 >= activationBeganWallMs &&
+                           renewed.startedMs <= activationEndedWallMs + 5000;
+        }
+        if (resetConfirmed) {
+          _apiFailures = 0;
+          _diagnostic = restarting ? "rapid cooling restarted; timer reset" : "rapid cooling confirmed";
+          return restarting ? ApiResult::Restarted : ApiResult::Confirmed;
+        }
       }
       if (observed == TemperatureState::Invalid) break;
     } else {
@@ -481,7 +612,6 @@ ApiResult EightSleepClient::activate(uint32_t pressAtMs) {
     }
   }
   if (activation.error != ESP_OK || activation.status >= 500) apiFailure(activation);
-  _apiNotBeforeMs = std::max(_apiNotBeforeMs, nowMs() + 30000);
-  _diagnostic = "activation unconfirmed; check app before another press";
-  return ApiResult::Ambiguous;
+  return unfinished(restarting ? "restart timer unconfirmed; check app before another press" :
+                                "activation unconfirmed; check app before another press");
 }

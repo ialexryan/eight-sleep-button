@@ -7,7 +7,7 @@
 
 enum class ApiResult {
   Confirmed,
-  AlreadyActive,
+  Restarted,
   Failed,
   Ambiguous,
   NeedsSetup,
@@ -36,6 +36,11 @@ class EightSleepClient {
     bool timedOut = false;
   };
   enum class TemperatureState { Invalid, Normal, Active };
+  struct CycleTiming {
+    uint64_t startedMs = 0;
+    uint64_t untilMs = 0;
+    bool valid = false;
+  };
 
   DeviceConfig& _config;
   bool (*_saveRefresh)(const String&);
@@ -60,7 +65,7 @@ class EightSleepClient {
   void authFailure(const char* message, uint64_t retryAfterMs = 0);
   void apiFailure(const Response& response);
   bool identityMatches(const String& body) const;
-  TemperatureState temperatureState(const String& body) const;
+  TemperatureState temperatureState(const String& body, CycleTiming* timing = nullptr) const;
   String temperatureUrl() const;
   ApiResult failureResult() const;
 };

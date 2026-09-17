@@ -74,7 +74,7 @@ def preview(fonts, destination):
     # as the firmware. This is a layout preview, not a simulation of LCD brightness.
     variants = (
         ("Started", (150, 230, 185), "Rapid", "Cooling", "Started"),
-        ("Active", (150, 230, 185), "Rapid", "Cooling", "Already active"),
+        ("Reset", (150, 230, 185), "Rapid", "Cooling", "Timer reset"),
         ("Busy", (240, 185, 85), "Sending", "", ""),
         ("Failure", (245, 130, 110), "Failed", "", "Check app"),
         ("Status", (155, 195, 240), "Status", "", "Wi-Fi OK"),

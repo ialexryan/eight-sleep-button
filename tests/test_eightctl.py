@@ -183,6 +183,33 @@ class ClientTests(unittest.TestCase):
             client.request("GET", "/test")
         self.assertEqual(client.blocked_until, 1200)
 
+    def test_server_retry_after_preserves_ambiguity_and_blocks_confirmation_after_reload(self):
+        client, transport = self.client(Response(status=503, headers={"Retry-After": "120"}))
+        with self.assertRaises(eight.ApiError) as raised:
+            client.request("PUT", "/test")
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertEqual(raised.exception.retry_after, 120)
+        with self.assertRaisesRegex(eight.DiagnosticError, "backoff"):
+            client.request("GET", "/test")
+        second = eight.EightClient(self.local, transport, lambda: self.now).load()
+        with self.assertRaisesRegex(eight.DiagnosticError, "backoff"):
+            second.request("GET", "/test")
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_server_http_date_retry_after_is_honored(self):
+        client, _ = self.client(Response(status=503, headers={"Retry-After": "Thu, 01 Jan 1970 00:20:00 GMT"}))
+        with self.assertRaises(eight.ApiError):
+            client.request("GET", "/test")
+        self.assertEqual(client.blocked_until, 1200)
+
+    def test_server_failure_without_retry_after_allows_read_only_verification(self):
+        client, transport = self.client(Response(status=503), {"state": "hotFlash"})
+        with self.assertRaises(eight.ApiError) as raised:
+            client.request("PUT", "/test")
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertEqual(client.request("GET", "/test"), {"state": "hotFlash"})
+        self.assertEqual([call[0] for call in transport.calls], ["PUT", "GET"])
+
     def test_inspect_only_reads_and_redacted_status_has_no_identifiers(self):
         client, transport = self.client(identity(), summary(), SETTINGS, temperature())
         target, settings, aggregate = client.inspect()
