@@ -7,3 +7,4 @@ build/tests/button_test
 tests/run_api_tests.sh
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 .venv/bin/python -m py_compile scripts/*.py
+.venv/bin/python scripts/generate_fonts.py --check

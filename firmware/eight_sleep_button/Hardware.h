@@ -18,6 +18,8 @@ class Hardware {
   // Returns false if neither a supported display nor an AtomS3 Lite was detected.
   bool begin(bool audioEnabled = false);
   void show(FeedbackStatus status, const char* detail = nullptr);
+  // USB-only visual preview: no tone, bed command, or change to button mode.
+  void preview(FeedbackStatus status, const char* detail = nullptr);
   void tick();
   void idle();
 

@@ -137,8 +137,17 @@ void serialCommand(const String& line) {
   const String op = d["op"] | "";
   if (op == "status") { showStatus(); return; }
   if (op == "feedback") {
-    hardware.show(FeedbackStatus::Diagnostics, "Display test");
-    Serial.println("{\"event\":\"feedback_test\"}"); return;
+    if (requestBusy.load()) {
+      Serial.println("{\"event\":\"busy\"}"); return;
+    }
+    const String state = d["state"] | "diagnostics";
+    if (state == "started") hardware.preview(FeedbackStatus::Success, "Started");
+    else if (state == "active") hardware.preview(FeedbackStatus::Success, "Already active");
+    else if (state == "busy") hardware.preview(FeedbackStatus::Busy);
+    else if (state == "failure") hardware.preview(FeedbackStatus::Failure, "Check app");
+    else if (state == "diagnostics") hardware.preview(FeedbackStatus::Diagnostics, "Display test");
+    else { Serial.println("{\"event\":\"invalid_command\"}"); return; }
+    Serial.println("{\"event\":\"feedback_test\",\"simulated\":true}"); return;
   }
   if (!setupAllowed()) {
     Serial.println("{\"event\":\"hold_button_to_configure\"}"); return;

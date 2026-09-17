@@ -45,6 +45,20 @@ Provisioning succeeded after the USB buffer fix. Runtime independently confirmed
 
 The user deferred the wall-power check while refining feedback. Success feedback now spells out “Rapid Cooling” on two readable lines and distinguishes “Started” from “Already active.” The revised firmware compiled, passed the existing tests, was flashed, and rebooted/authenticated with zero startup requests. Visual review of the revised wording is separate from the earlier physical screen check.
 
+Typography revision: replaced the scaled default bitmap font and decorative icon
+with Barlow Semi Condensed SemiBold grayscale VLW fonts. Title size is 41 pixels
+(38 for “Sending”), captions 21 pixels; actual ink bounds are smaller than those
+nominal font sizes. The widest lines are 121–123 pixels on the 128-pixel display.
+The generator's layout preview and an independent review verified bounds and
+font format. The S3R build and existing safety/API tests passed. Font regeneration
+matches the checked-in data. The flashed board rebooted, synchronized time, and
+authenticated with zero accepted/completed presses. Backlight stays at 8/255;
+display ink has higher contrast, and Lite LED behavior is unchanged. Physical
+readability in a dark room remains a user observation, not a build-test result.
+Six USB visual previews were acknowledged by the real board; afterward it remained
+in live mode, authenticated and idle, with zero accepted/completed presses. These
+previews exercise font rendering without sending a cooling request.
+
 The last two checks require actual elapsed time/physical operation. A successful build or mocked response is not evidence for them.
 
 ## API observations

@@ -78,6 +78,11 @@ For a device that is already configured, hold its face for two seconds before pr
 - A press during a request is discarded. Offline presses are discarded. No press is queued for later reconnection.
 - Boot, reset, reconnection, flashing, and a button held during boot never activate cooling.
 
+The S3R uses large semibold text with native grayscale antialiasing and high-contrast
+colored lettering on black. “Rapid Cooling” fills two lines, with a larger result
+caption below. The backlight remains at 8/255 and turns off after feedback. The
+licensed font and reproducible generator are documented in [display fonts](assets/fonts/README.md).
+
 ## Security and maintenance
 
 - Certificate-verified HTTPS uses the ESP-IDF root certificate bundle and a synchronized clock. There is no insecure TLS fallback.
@@ -93,6 +98,11 @@ For a device that is already configured, hold its face for two seconds before pr
 .venv/bin/python scripts/boardctl.py status
 .venv/bin/python scripts/boardctl.py monitor --seconds 60
 .venv/bin/python scripts/boardctl.py feedback
+# Five-second visual previews; no bed command, tone, or change to button mode:
+.venv/bin/python scripts/boardctl.py feedback --state started
+.venv/bin/python scripts/boardctl.py feedback --state active
+.venv/bin/python scripts/boardctl.py feedback --state busy
+.venv/bin/python scripts/boardctl.py feedback --state failure
 ```
 
 For the USB transfer regression (read-only, no secrets or bed commands):

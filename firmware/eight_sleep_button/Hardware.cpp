@@ -1,4 +1,5 @@
 #include "Hardware.h"
+#include "StatusFonts.h"
 
 #include <M5Unified.h>
 
@@ -66,8 +67,28 @@ Color statusColor(FeedbackStatus status) {
   return {75, 105, 145};
 }
 
-void drawCentered(const char* text, int y, uint8_t size) {
-  M5.Display.setTextSize(size);
+Color displayColor(FeedbackStatus status) {
+  // Keep the dim backlight and black background; lighter ink preserves solid
+  // strokes and visible antialiased edges. The optional Lite LED is unchanged.
+  switch (status) {
+    case FeedbackStatus::Busy: return {240, 185, 85};
+    case FeedbackStatus::Success: return {150, 230, 185};
+    case FeedbackStatus::Failure: return {245, 130, 110};
+    case FeedbackStatus::Diagnostics: return {155, 195, 240};
+    case FeedbackStatus::Setup: return {240, 185, 85};
+  }
+  return {155, 195, 240};
+}
+
+void selectFont(const uint8_t* font) {
+  M5.Display.setTextSize(1);
+  if (!M5.Display.loadFont(font)) {
+    // Preserve readable feedback if a font-metric allocation ever fails.
+    M5.Display.setFont(&fonts::Font2);
+  }
+}
+
+void drawCentered(const char* text, int y) {
   const int x = (M5.Display.width() - M5.Display.textWidth(text)) / 2;
   M5.Display.setCursor(x < 0 ? 0 : x, y);
   M5.Display.print(text);
@@ -161,6 +182,13 @@ void Hardware::show(FeedbackStatus status, const char* detail) {
   playConfirmation(status);
 }
 
+void Hardware::preview(FeedbackStatus status, const char* detail) {
+  if (!initialized_) return;
+  drawStatus(status, detail);
+  visible_ = hasDisplay_ || hasLed_;
+  visibleUntil_ = millis() + 5000;
+}
+
 void Hardware::drawStatus(FeedbackStatus status, const char* detail) {
   const auto color = statusColor(status);
   if (hasLed_) {
@@ -172,34 +200,17 @@ void Hardware::drawStatus(FeedbackStatus status, const char* detail) {
   M5.Display.setBrightness(0);
   M5.Display.wakeup();
   M5.Display.fillScreen(TFT_BLACK);
-  const uint16_t foreground = M5.Display.color565(color.red, color.green, color.blue);
+  const auto ink = displayColor(status);
+  const uint16_t foreground = M5.Display.color565(ink.red, ink.green, ink.blue);
   M5.Display.setTextColor(foreground, TFT_BLACK);
-  M5.Display.drawCircle(64, 31, 13, foreground);
-  switch (status) {
-    case FeedbackStatus::Success:
-      M5.Display.drawLine(57, 31, 62, 36, foreground);
-      M5.Display.drawLine(62, 36, 72, 25, foreground);
-      break;
-    case FeedbackStatus::Failure:
-      M5.Display.drawLine(59, 26, 69, 36, foreground);
-      M5.Display.drawLine(69, 26, 59, 36, foreground);
-      break;
-    case FeedbackStatus::Busy:
-      M5.Display.fillCircle(59, 31, 1, foreground);
-      M5.Display.fillCircle(64, 31, 1, foreground);
-      M5.Display.fillCircle(69, 31, 1, foreground);
-      break;
-    default:
-      M5.Display.drawLine(64, 26, 64, 33, foreground);
-      M5.Display.drawPixel(64, 37, foreground);
-      break;
-  }
+  selectFont(status == FeedbackStatus::Busy ? status_fonts::kBusy : status_fonts::kTitle);
   if (status == FeedbackStatus::Success) {
-    // Keep the feature's full name legible on the 128-pixel display.
-    drawCentered("Rapid", 54, 2);
-    drawCentered("Cooling", 75, 2);
+    // Spend the 128x128 active area on words. Native grayscale fonts avoid the
+    // jagged edges of magnifying the default 1-bit font or shrinking a bitmap.
+    drawCentered("Rapid", 5);
+    drawCentered("Cooling", 48);
   } else {
-    drawCentered(statusTitle(status), 57, 2);
+    drawCentered(statusTitle(status), detail && detail[0] ? 25 : 44);
   }
   if (detail != nullptr && detail[0] != '\0') {
     // A caller may pass a short, non-secret detail. Bound it to the display;
@@ -210,8 +221,13 @@ void Hardware::drawStatus(FeedbackStatus status, const char* detail) {
       const char c = detail[length];
       line[length++] = (c >= 32 && c <= 126) ? c : ' ';
     }
-    drawCentered(line, status == FeedbackStatus::Success ? 104 : 84, 1);
+    selectFont(status_fonts::kDetail);
+    while (length && M5.Display.textWidth(line) > M5.Display.width() - 4) {
+      line[--length] = '\0';
+    }
+    drawCentered(line, status == FeedbackStatus::Success ? 101 : 83);
   }
+  M5.Display.unloadFont();
   M5.Display.setBrightness(kDisplayBrightness);
 }
 
