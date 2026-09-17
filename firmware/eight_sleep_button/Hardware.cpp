@@ -41,7 +41,7 @@ uint32_t displayDuration(FeedbackStatus status) {
 const char* statusTitle(FeedbackStatus status) {
   switch (status) {
     case FeedbackStatus::Busy: return "Sending";
-    case FeedbackStatus::Success: return "Cooling";
+    case FeedbackStatus::Success: return "Rapid Cooling";
     case FeedbackStatus::Failure: return "Failed";
     case FeedbackStatus::Diagnostics: return "Status";
     case FeedbackStatus::Setup: return "Set up";
@@ -194,7 +194,13 @@ void Hardware::drawStatus(FeedbackStatus status, const char* detail) {
       M5.Display.drawPixel(64, 37, foreground);
       break;
   }
-  drawCentered(statusTitle(status), 57, 2);
+  if (status == FeedbackStatus::Success) {
+    // Keep the feature's full name legible on the 128-pixel display.
+    drawCentered("Rapid", 54, 2);
+    drawCentered("Cooling", 75, 2);
+  } else {
+    drawCentered(statusTitle(status), 57, 2);
+  }
   if (detail != nullptr && detail[0] != '\0') {
     // A caller may pass a short, non-secret detail. Bound it to the display;
     // never print API responses, SSIDs, credentials, or tokens here.
@@ -204,7 +210,7 @@ void Hardware::drawStatus(FeedbackStatus status, const char* detail) {
       const char c = detail[length];
       line[length++] = (c >= 32 && c <= 126) ? c : ' ';
     }
-    drawCentered(line, 84, 1);
+    drawCentered(line, status == FeedbackStatus::Success ? 104 : 84, 1);
   }
   M5.Display.setBrightness(kDisplayBrightness);
 }

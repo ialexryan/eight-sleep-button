@@ -28,7 +28,7 @@ Keep simulated, compiled, and observed results separate. No account identifiers,
 - [x] Physical press invokes cooling with API confirmation. USB reported `Confirmed` in live mode; the user saw Rapid Cooling in the app and felt their side respond.
 - [x] Duplicate presses do not restart the cooling timer. Subsequent real presses returned `AlreadyActive`; the user confirmed the countdown did not restart.
 - [x] Wi-Fi disconnect/recovery; no delayed activation. Forced disconnection/reconnection on the real board restored Wi-Fi and preserved the accepted/completed request counts.
-- [ ] Board refresh-token exchange succeeds and survives reset.
+- [x] Board refresh-token exchange succeeds across software reset/reflash using saved credentials. Physical wall-power cold-start acceptance remains separate.
 - [ ] Power interruption and boot-held button produce no activation.
 - [ ] Operation on a USB wall supply with the laptop disconnected.
 - [ ] Hours-idle responsiveness.
@@ -42,6 +42,8 @@ The user requested an expedited test instead of waiting through the full native 
 Manual cleanup succeeded through the native deactivate endpoint. The API reported return to the original normal operating state and unchanged cooling settings, schedules, and temperature configuration.
 
 Provisioning succeeded after the USB buffer fix. Runtime independently confirmed Wi-Fi, synchronized time, and successful refresh-token authentication over verified HTTPS. No account password was sent to the board. The laptop token copy was removed after transfer.
+
+The user deferred the wall-power check while refining feedback. Success feedback now spells out “Rapid Cooling” on two readable lines and distinguishes “Started” from “Already active.” The revised firmware compiled, passed the existing tests, was flashed, and rebooted/authenticated with zero startup requests. Visual review of the revised wording is separate from the earlier physical screen check.
 
 The last two checks require actual elapsed time/physical operation. A successful build or mocked response is not evidence for them.
 

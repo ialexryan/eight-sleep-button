@@ -74,7 +74,7 @@ For a device that is already configured, hold its face for two seconds before pr
 
 - **Short press and release:** activate native Rapid Cooling on the verified account's side. If already active, return success without restarting its timer.
 - **Long hold (1.5 seconds):** brief local diagnostics and a USB setup window; no bed change.
-- Screen/backlight stays off when idle. Amber “Sending” means request in progress, green “Cooling” means the API confirmed cooling, and red means failure. “Check app” means the result is uncertain; do not assume a timeout means the request failed.
+- Screen/backlight stays off when idle. Amber “Sending” means request in progress. Green **“Rapid Cooling”** with **“Started”** means a new cycle was confirmed; **“Already active”** means its existing timer was left untouched. Red means failure. “Check app” means the result is uncertain; do not assume a timeout means the request failed.
 - A press during a request is discarded. Offline presses are discarded. No press is queued for later reconnection.
 - Boot, reset, reconnection, flashing, and a button held during boot never activate cooling.
 

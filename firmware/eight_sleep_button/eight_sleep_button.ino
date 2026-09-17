@@ -235,7 +235,8 @@ void loop() {
   if (xQueueReceive(results, &result, 0) == pdTRUE) {
     const bool ok = result.outcome == ApiResult::Confirmed || result.outcome == ApiResult::AlreadyActive;
     hardware.show(ok ? FeedbackStatus::Success : FeedbackStatus::Failure,
-                  testMode.load() ? "TEST only" : (ok ? "Cooling" :
+                  testMode.load() ? "TEST only" : (ok ?
+                    (result.outcome == ApiResult::AlreadyActive ? "Already active" : "Started") :
                     (result.outcome == ApiResult::Ambiguous ? "Check app" : "Try again")));
     Serial.printf("{\"event\":\"result\",\"code\":%d,\"simulated\":%s}\n",
                   int(result.outcome), testMode.load() ? "true" : "false");
