@@ -42,15 +42,25 @@ Run these commands in your own interactive Terminal. Email, account password, Wi
 
 `login` uses the account password once and retains only tokens in ignored `.local/session.json` with owner-only permissions. `inspect` verifies the authenticated user, current pod, assignment and pairing, and reads the existing cooling settings without changing them.
 
-`activate` waits for `COOL`, rechecks the target and settings, sends **one** activation, and requires the selected device's `currentState.type` to become `hotFlash`. It watches the existing configured cycle until the API leaves that state and checks that the reported schedule/temperature configuration and cooling settings are unchanged. Keep the app available for this initial validation; confirm that your side cools and normal operation resumes when prompted. It refuses to claim preservation if the necessary fields are missing.
+`activate` waits for `COOL`, rechecks the target and settings, sends **one** activation, and requires the selected device's `currentState.type` to become `hotFlash`. It returns after confirmation, without waiting through the cooling timer. Keep the app available for this initial validation and verify that your side cools.
 
-To resume read-only observation after interrupting the watcher:
+For an expedited setup, after observing Rapid Cooling in the app and on the bed, end the test using the native deactivate endpoint:
+
+```sh
+.venv/bin/python scripts/eightctl.py deactivate --observed
+```
+
+This verifies manual cleanup and preserved cooling settings/schedule configuration. It **does not verify natural timer expiry**. The `--observed` flag records your actual app/bed observations; use it only after those checks.
+
+To verify natural expiry instead, observe the running cycle with:
 
 ```sh
 .venv/bin/python scripts/eightctl.py watch
 ```
 
-After successful native verification, provision Wi-Fi and the refresh token over USB:
+`watch` checks for the cycle leaving `hotFlash` and unchanged reported schedule/temperature configuration, then prompts for app/bed observations. It refuses to claim preservation if required fields are missing. `activate --watch` combines activation and this longer check.
+
+After verified activation and either manual cleanup or natural completion, provision Wi-Fi and the refresh token over USB:
 
 ```sh
 .venv/bin/python scripts/eightctl.py provision --port /dev/cu.usbmodem1101
@@ -83,6 +93,12 @@ For a device that is already configured, hold its face for two seconds before pr
 .venv/bin/python scripts/boardctl.py status
 .venv/bin/python scripts/boardctl.py monitor --seconds 60
 .venv/bin/python scripts/boardctl.py feedback
+```
+
+For the USB transfer regression (read-only, no secrets or bed commands):
+
+```sh
+.venv/bin/python tests/usb_transfer_test.py --port /dev/cu.usbmodem1101
 ```
 
 For a simulated physical-button test, long-hold first if configured, then run `boardctl.py test-on`. Physical short presses exercise debounce/overlap and display a result marked “TEST only”; **no cloud requests occur in this mode**. Turn it off with a long hold followed by `boardctl.py test-off`, or reset the device. Do not count this as a live cooling test.

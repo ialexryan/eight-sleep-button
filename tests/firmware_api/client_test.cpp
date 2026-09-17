@@ -126,6 +126,18 @@ Reply auth(std::string rotated = "fixture-refresh-rotated", unsigned expires = 7
           "{\"userId\":\"fixture-user\",\"access_token\":\"fixture-access-token\",\"refresh_token\":\"" +
               rotated + "\",\"expires_in\":" + std::to_string(expires) + "}"};
 }
+Reply authWithExpiry(const std::string& jsonValue) {
+  Reply reply = auth();
+  const auto start = reply.body.find("72000");
+  reply.body.replace(start, strlen("72000"), jsonValue);
+  return reply;
+}
+Reply authWithoutIdentity() {
+  Reply reply = auth();
+  JsonDocument token; deserializeJson(token, reply.body); token.remove("userId");
+  reply.body.clear(); serializeJson(token, reply.body);
+  return reply;
+}
 Reply identity(std::string side = "right") {
   return {HTTP_METHOD_GET, "/users/me", 200,
           "{\"user\":{\"userId\":\"fixture-user\",\"currentDevice\":{\"id\":\"fixture-device\",\"side\":\"" + side + "\"}}}"};
@@ -269,6 +281,37 @@ int main() {
     assert(client.activate(millis()) == ApiResult::NeedsSetup && saved.empty());
     client.maintain(); assert(recorded.size() == 1);
   });
+  test("missing refresh identity succeeds after mandatory live identity verification", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithoutIdentity(), identity(), temperature(), put(), temperature("hotFlash")};
+    assert(client.activate(millis()) == ApiResult::Confirmed && saved.size() == 1);
+    assert(c.userId == "fixture-user" && count(HTTP_METHOD_PUT) == 1);
+    assert(recorded[1].url.find("/users/me") != std::string::npos);
+  });
+  test("missing refresh identity cannot bypass mismatched live user", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply wrongUser = identity();
+    const auto at = wrongUser.body.find("fixture-user");
+    wrongUser.body.replace(at, strlen("fixture-user"), "another-user");
+    replies = {authWithoutIdentity(), wrongUser};
+    assert(client.activate(millis()) == ApiResult::NeedsSetup);
+    assert(count(HTTP_METHOD_PUT) == 0);
+  });
+  test("missing refresh identity cannot bypass mismatched live side", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithoutIdentity(), identity("left")};
+    assert(client.activate(millis()) == ApiResult::NeedsSetup);
+    assert(count(HTTP_METHOD_PUT) == 0);
+  });
+  test("null refresh identity retains provisioned identity", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    Reply nullIdentity = authWithoutIdentity();
+    JsonDocument token; deserializeJson(token, nullIdentity.body); token["userId"] = nullptr;
+    nullIdentity.body.clear(); serializeJson(token, nullIdentity.body);
+    replies = {nullIdentity, identity(), temperature("hotFlash")};
+    assert(client.activate(millis()) == ApiResult::AlreadyActive);
+    assert(c.userId == "fixture-user" && count(HTTP_METHOD_PUT) == 0);
+  });
   test("refresh response without rotation retains existing credential", [] {
     auto c = config(); EightSleepClient client(c, saveToken);
     Reply retained = auth();
@@ -283,6 +326,36 @@ int main() {
     fakeNowMs += 539000; client.maintain(); assert(recorded.size() == 1);
     fakeNowMs += 2000; replies.push_back(auth("fixture-refresh-second", 600)); client.maintain();
     assert(count(HTTP_METHOD_POST) == 2 && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("decimal JSON token expiry permits confirmed activation", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithExpiry("72000.0"), identity(), temperature(), put(), temperature("hotFlash")};
+    assert(client.activate(millis()) == ApiResult::Confirmed && saved.size() == 1);
+  });
+  test("fractional token expiry retains actual milliseconds", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithExpiry("600.5")}; client.maintain();
+    fakeNowMs += 540449; client.maintain(); assert(recorded.size() == 1);
+    fakeNowMs += 1; replies.push_back(auth()); client.maintain();
+    assert(count(HTTP_METHOD_POST) == 2 && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("boolean token expiry is rejected", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithExpiry("true")};
+    assert(client.activate(millis()) == ApiResult::NeedsSetup);
+    assert(saved.empty() && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("string token expiry is rejected", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithExpiry("\"72000\"")};
+    assert(client.activate(millis()) == ApiResult::NeedsSetup);
+    assert(saved.empty() && count(HTTP_METHOD_PUT) == 0);
+  });
+  test("nonfinite numeric token expiry is rejected", [] {
+    auto c = config(); EightSleepClient client(c, saveToken);
+    replies = {authWithExpiry("1e999")};
+    assert(client.activate(millis()) == ApiResult::Backoff);
+    assert(saved.empty() && count(HTTP_METHOD_PUT) == 0);
   });
   test("429 Retry-After prevents queued or early activation", [] {
     auto c = config(); EightSleepClient client(c, saveToken);

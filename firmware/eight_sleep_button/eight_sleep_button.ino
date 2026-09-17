@@ -192,6 +192,10 @@ void readSerial() {
 }
 
 void setup() {
+  // A provisioning JSON record is larger than HWCDC's 256-byte default queue.
+  // Reserve the full bounded record before starting USB so bursts cannot drop it.
+  Serial.setRxBufferSize(8193);
+  Serial.setTxBufferSize(2048);
   Serial.begin(115200); // never wait for a connected USB host
   Serial.setTxTimeoutMs(0); // diagnostic backpressure must never stall the button
   pinMode(41, INPUT_PULLUP);

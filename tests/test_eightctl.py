@@ -115,6 +115,33 @@ class ClientTests(unittest.TestCase):
             client.refresh()
         self.assertEqual(client.tokens["user_id"], USER)
 
+    def test_refresh_without_user_id_retains_established_identity_and_rotation(self):
+        reply = tokens(access="rotated-access", refresh="rotated-refresh")
+        del reply["userId"]
+        client, _ = self.client(reply)
+        client.refresh()
+        saved = eight.load_private(client.session_path)
+        self.assertEqual(saved["user_id"], USER)
+        self.assertEqual(saved["access_token"], "rotated-access")
+        self.assertEqual(saved["refresh_token"], "rotated-refresh")
+
+    def test_initial_login_without_user_id_is_rejected(self):
+        reply = tokens()
+        del reply["userId"]
+        client = eight.EightClient(self.local, Transport(reply), lambda: self.now)
+        with self.assertRaisesRegex(eight.DiagnosticError, "user identity"):
+            client.login("synthetic-email", "synthetic-password")
+        self.assertFalse(client.session_path.exists())
+
+    def test_refresh_explicit_invalid_user_id_cannot_use_fallback(self):
+        for user in (None, "", False):
+            with self.subTest(user=user):
+                client, _ = self.client(tokens(user=user))
+                before = client.session_path.read_bytes()
+                with self.assertRaisesRegex(eight.DiagnosticError, "user identity"):
+                    client.refresh()
+                self.assertEqual(client.session_path.read_bytes(), before)
+
     def test_refresh_failure_does_not_password_fallback(self):
         client, transport = self.client(Response(status=401, raw=b"secret-server-body"))
         with self.assertRaises(eight.ApiError) as raised:
@@ -234,6 +261,39 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(eight.DiagnosticError, "Configuration differs"):
                 eight.watch(client)
         self.assertFalse((self.local / "native-verification.json").exists())
+
+    def test_manual_cleanup_bodyless_once_and_never_claims_natural_expiry(self):
+        client, transport = self.client(identity(), summary(), SETTINGS, temperature(), Response(status=204), temperature("hotFlash"),
+                                        identity(), summary(), SETTINGS, temperature("hotFlash"), Response(status=204), temperature(), SETTINGS)
+        with contextlib.redirect_stdout(io.StringIO()):
+            eight.activate(client, TARGET, SETTINGS, temperature())
+            report = eight.deactivate(client, observed=True)
+        self.assertTrue(report["manual_cleanup_verified"])
+        self.assertTrue(report["user_observed_app_and_bed"])
+        self.assertFalse(report["termination_observed"])
+        self.assertFalse(report["natural_expiry_verified"])
+        self.assertEqual(report["termination_kind"], "manual")
+        cleanup = [call for call in transport.calls if call[1].endswith("/deactivate")]
+        self.assertEqual(len(cleanup), 1)
+        self.assertNotIn("json", cleanup[0][2])
+        self.assertNotIn("data", cleanup[0][2])
+
+    def test_cleanup_timeout_checks_state_without_replay(self):
+        client, transport = self.client(identity(), summary(), SETTINGS, temperature(), Response(status=204), temperature("hotFlash"),
+                                        identity(), summary(), SETTINGS, temperature("hotFlash"), requests.Timeout(), temperature(), SETTINGS)
+        with contextlib.redirect_stdout(io.StringIO()):
+            eight.activate(client, TARGET, SETTINGS, temperature())
+            report = eight.deactivate(client)
+        self.assertTrue(report["manual_cleanup_verified"])
+        self.assertFalse(report["user_observed_app_and_bed"])
+        self.assertEqual(len([call for call in transport.calls if call[1].endswith("/deactivate")]), 1)
+
+    def test_cleanup_wrong_target_does_not_send_put(self):
+        client, transport = self.client(identity(), summary(), SETTINGS, temperature())
+        eight.save_private(self.local / "activation.json", {"confirmed_at": 1, "target": {**TARGET, "side": "right"}})
+        with self.assertRaisesRegex(eight.DiagnosticError, "assignment changed"):
+            eight.deactivate(client)
+        self.assertTrue(all(call[0] == "GET" for call in transport.calls))
 
     def test_http408_activation_is_checked_without_replay(self):
         client, transport = self.client(identity(), summary(), SETTINGS, temperature(), Response(status=408), temperature("hotFlash"))

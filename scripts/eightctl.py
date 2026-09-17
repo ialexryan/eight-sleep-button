@@ -174,7 +174,11 @@ class EightClient:
             raise DiagnosticError("Unexpected token response; authenticate again.")
         access = require_text(result.get("access_token"), "access token")
         refresh = require_text(result.get("refresh_token") or (previous or {}).get("refresh_token"), "refresh token")
-        user = require_text(result.get("userId"), "user identity")
+        # Live refresh responses may omit userId. Retain the established identity
+        # only when the field is absent; an explicitly invalid or changed identity
+        # must still fail. Initial password login always requires userId.
+        identity = result["userId"] if "userId" in result else (previous or {}).get("user_id")
+        user = require_text(identity, "user identity")
         expiry = result.get("expires_in")
         if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry <= 0:
             raise DiagnosticError("API returned an invalid token expiry.")
@@ -372,7 +376,8 @@ def watch(client, timeout=None, interval=10, sleep=time.sleep):
             if not same_settings or not same_configuration:
                 raise DiagnosticError("Configuration differs from the baseline; investigate before enabling the button.")
             verification = {**report, "target_hash": fingerprint(target), "activation_observed": True,
-                            "termination_observed": True, "user_observed_app_and_bed": False}
+                            "termination_observed": True, "termination_kind": "natural",
+                            "natural_expiry_verified": True, "user_observed_app_and_bed": False}
             save_private(client.local / "native-verification.json", verification)
             return report
         sleep(interval)
@@ -392,6 +397,58 @@ def confirm_observation(client):
         print("API evidence saved; app/bed observations are still required before provisioning.")
 
 
+def deactivate(client, observed=False, sleep=time.sleep):
+    """Expedited, explicitly requested cleanup; never claims natural expiry."""
+    baseline = load_private(client.local / "activation.json")
+    if not baseline.get("confirmed_at"):
+        raise DiagnosticError("No confirmed test activation to clean up; inspect the app first.")
+    target, settings, aggregate = client.inspect()
+    if target != baseline["target"]:
+        raise DiagnosticError("Pod assignment changed since activation; refusing to control a different side.")
+    state = selected_state(aggregate, target)
+    sent = state == "hotFlash"
+    if sent:
+        try:
+            client.request("PUT", client.user_path("/temperature/hot-flash-mode/deactivate"))
+        except ApiError as error:
+            if not error.ambiguous:
+                raise
+            print(str(error))
+        for attempt in range(4):
+            if attempt:
+                sleep(2)
+            try:
+                aggregate = client.temperature()
+                state = selected_state(aggregate, target)
+            except DiagnosticError:
+                state = "hotFlash"
+            if state != "hotFlash":
+                break
+        else:
+            raise DiagnosticError("Cleanup is unconfirmed. Check the app; no deactivation retry was sent.")
+    settings = client.settings()
+    same_settings = settings == baseline["settings"]
+    same_configuration = config_fingerprint(aggregate) == baseline["configuration_hash"]
+    report = {"stage": "cooling_deactivated", "state": safe_state(state),
+              "settings_preserved": same_settings, "schedule_configuration_preserved": same_configuration,
+              "timestamp": int(client.clock()), "target_hash": fingerprint(target),
+              "activation_observed": True, "termination_observed": False,
+              "termination_kind": "manual" if sent else "already_inactive",
+              "natural_expiry_verified": False, "manual_cleanup_verified": True,
+              "deactivation_request_sent": sent, "user_observed_app_and_bed": bool(observed)}
+    save_private(client.local / "diagnostic-status.json", report)
+    if not same_settings or not same_configuration:
+        raise DiagnosticError("Cooling is inactive but configuration differs from the baseline; investigate before provisioning.")
+    save_private(client.local / "native-verification.json", report)
+    print("Confirmed: Rapid Cooling is inactive and original cooling settings/schedule configuration are preserved.")
+    print("This expedited test does not verify natural timer expiry.")
+    if observed:
+        print("Your reported app/bed observations were recorded. The board can now be provisioned.")
+    else:
+        print("App/bed observations are not yet recorded; use --observed only after actually checking both.")
+    return report
+
+
 def provision(client, port, audio=False):
     try:
         import serial
@@ -402,12 +459,14 @@ def provision(client, port, audio=False):
     try:
         verification = load_private(client.local / "native-verification.json")
     except DiagnosticError:
-        raise DiagnosticError("Complete an observed activate/watch test before provisioning the board.") from None
-    if (verification.get("target_hash") != fingerprint(target)
+        raise DiagnosticError("Complete an observed activation plus watch or manual deactivate test before provisioning the board.") from None
+    cleanup_verified = (verification.get("termination_observed") is True
+                        or verification.get("manual_cleanup_verified") is True)
+    if (verification.get("target_hash") != fingerprint(target) or not cleanup_verified
             or not all(verification.get(key) is True for key in (
-                "activation_observed", "termination_observed", "user_observed_app_and_bed",
+                "activation_observed", "user_observed_app_and_bed",
                 "settings_preserved", "schedule_configuration_preserved"))):
-        raise DiagnosticError("Native cooling behavior for this pod side is not yet fully verified. Complete activate/watch first.")
+        raise DiagnosticError("Cooling activation/cleanup and app/bed observations for this side are not verified. Complete watch or deactivate first.")
     if not sys.stdin.isatty():
         raise DiagnosticError("Provisioning requires a local interactive terminal.")
     ssid = getpass.getpass("2.4 GHz Wi-Fi network name (hidden): ")
@@ -420,7 +479,13 @@ def provision(client, port, audio=False):
         with serial.Serial(port, 115200, timeout=1, write_timeout=5) as device:
             time.sleep(2)
             device.reset_input_buffer()
-            device.write((json.dumps(packet, separators=(",", ":")) + "\n").encode())
+            wire = (json.dumps(packet, separators=(",", ":")) + "\n").encode()
+            if len(wire) > 8192:
+                raise DiagnosticError("Provisioning record exceeds the device's supported size.")
+            # Pace USB bursts as well as sizing the firmware's receive queue.
+            for offset in range(0, len(wire), 128):
+                device.write(wire[offset:offset + 128])
+                time.sleep(0.02)
             device.flush()
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
@@ -452,8 +517,12 @@ def provision(client, port, audio=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("login", "inspect", "refresh", "activate"):
+    for name in ("login", "inspect", "refresh"):
         sub.add_parser(name)
+    activating = sub.add_parser("activate")
+    activating.add_argument("--watch", action="store_true", help="Also wait for natural expiry and record observations")
+    cleanup = sub.add_parser("deactivate", help="End the confirmed test cycle now; does not verify natural expiry")
+    cleanup.add_argument("--observed", action="store_true", help="Record that you actually observed Rapid Cooling in the app and felt cooling on your side")
     watching = sub.add_parser("watch")
     watching.add_argument("--timeout", type=int, help="Read-only watch duration in seconds")
     provisioning = sub.add_parser("provision")
@@ -486,14 +555,18 @@ def main(argv=None):
                 print("Cancelled; no activation sent.")
                 return 0
             result = activate(client, target, settings, aggregate)
-            if result == "confirmed":
+            if result == "confirmed" and args.watch:
                 watch(client)
                 confirm_observation(client)
+            elif result == "confirmed":
+                print("Activation verified. After checking app/bed, use deactivate --observed for short-test cleanup, or watch to verify natural expiry.")
         elif args.command == "watch":
             if args.timeout is not None and not 1 <= args.timeout <= 7200:
                 raise DiagnosticError("Watch timeout must be between 1 and 7200 seconds.")
             watch(client, args.timeout)
             confirm_observation(client)
+        elif args.command == "deactivate":
+            deactivate(client, args.observed)
         elif args.command == "provision":
             provision(client, args.port, args.audio)
         return 0

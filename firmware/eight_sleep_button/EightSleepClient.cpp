@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #if !CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
@@ -114,7 +115,8 @@ bool EightSleepClient::usableConfig() const {
 }
 
 bool EightSleepClient::readyForNetwork() {
-  if (_needsSetup || !usableConfig()) {
+  if (_needsSetup) return false; // Preserve the actionable failure reason.
+  if (!usableConfig()) {
     _diagnostic = "setup required";
     return false;
   }
@@ -260,15 +262,25 @@ bool EightSleepClient::refresh() {
   const char* access = token["access_token"].is<const char*>() ? token["access_token"].as<const char*>() : nullptr;
   const bool hasRefresh = !token["refresh_token"].isNull();
   const char* rotated = token["refresh_token"].is<const char*>() ? token["refresh_token"].as<const char*>() : nullptr;
+  // The live refresh response omits userId. Retain the identity verified during
+  // provisioning; a supplied identity must still match. Every activation also
+  // checks /users/me against the configured user, device, and side before PUT.
+  const bool hasIdentity = !token["userId"].isNull();
   if (!safeToken(access) || (hasRefresh && !safeToken(rotated)) ||
-      !matches(token["userId"], _config.userId) ||
-      !token["expires_in"].is<uint32_t>()) {
+      (hasIdentity && !matches(token["userId"], _config.userId)) ||
+      !token["expires_in"].is<double>() || token["expires_in"].is<bool>()) {
     _needsSetup = true;
-    _diagnostic = "authentication identity or schema mismatch; reprovision";
+    if (!safeToken(access)) _diagnostic = "refresh response: invalid access token";
+    else if (hasRefresh && !safeToken(rotated)) _diagnostic = "refresh response: invalid rotated token";
+    else if (hasIdentity && !matches(token["userId"], _config.userId)) _diagnostic = "refresh response: identity mismatch";
+    else _diagnostic = "refresh response: expiry schema mismatch";
     return false;
   }
-  const uint32_t lifetime = token["expires_in"].as<uint32_t>();
-  if (lifetime == 0 || lifetime > 31536000) {
+  // The API can encode expires_in as a decimal (the reference client's field
+  // is Double). Accept JSON numbers only, retaining subsecond precision rather
+  // than treating 72000.0 as a schema error or rounding its expiry upward.
+  const double lifetime = token["expires_in"].as<double>();
+  if (!std::isfinite(lifetime) || lifetime <= 0 || lifetime > 31536000) {
     authFailure("invalid token lifetime");
     return false;
   }
@@ -284,9 +296,10 @@ bool EightSleepClient::refresh() {
     _config.refreshToken = rotated;
   }
   _accessToken = access;
-  _expiresAtMs = nowMs() + static_cast<uint64_t>(lifetime) * 1000;
-  const uint32_t margin = std::min<uint32_t>(300, lifetime / 10);
-  _refreshAtMs = _expiresAtMs - static_cast<uint64_t>(margin) * 1000;
+  const uint64_t lifetimeMs = static_cast<uint64_t>(lifetime * 1000);
+  _expiresAtMs = nowMs() + lifetimeMs;
+  const uint64_t marginMs = std::min<uint64_t>(300000, lifetimeMs / 10);
+  _refreshAtMs = _expiresAtMs - marginMs;
   _authFailures = 0;
   // Respect the reported expiry, but an unexpectedly tiny lifetime must not
   // create a continuous successful-login loop while the appliance is idle.
